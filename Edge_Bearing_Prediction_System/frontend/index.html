@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>工业轴承故障时序监测系统</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#050505;color:#e0e0e0;font-family:Consolas;height:100vh;display:flex;flex-direction:column;overflow:hidden;}
+.top-bar{background:#111;border-bottom:2px solid #333;padding:10px 20px;display:flex;justify-content:space-between;align-items:center;}
+.sys-title{color:#a0a0a0;font-weight:bold;letter-spacing:2px;}
+.status-indicator{display:flex;gap:10px;align-items:center;}
+.led{width:12px;height:12px;border-radius:50%;background:#f33;box-shadow:0 0 8px #f33;}
+.led.online{background:#0f0;box-shadow:0 0 10px #0f0;}
+.main-container{display:flex;flex:1;padding:15px;gap:15px;}
+.oscilloscope-panel{flex:3;background:#0a0a0a;border:1px solid #333;position:relative;border-radius:4px;}
+.telemetry-panel{flex:1;background:#111;border:1px solid #333;border-radius:4px;padding:20px;display:flex;flex-direction:column;gap:20px;}
+.data-block{background:#1a1a1a;padding:15px;border-left:4px solid #555;border-radius:2px;}
+.data-block.ch1{border-left:#0ff;}
+.data-block.ch2{border-left:#f0f;}
+.data-block.alert{border-left:#fa0;}
+.data-block.warn{border-left:red;box-shadow:0 0 6px red;}
+.data-label{font-size:12px;color:#888;margin-bottom:5px;}
+.data-value{font-size:32px;font-weight:bold;font-family:Courier New;}
+.ch1-text{color:#0ff;text-shadow:0 0 6px #0ff;}
+.ch2-text{color:#f0f;text-shadow:0 0 6px #f0f;}
+.alert-text{color:#fa0;}
+svg{width:100%;height:100%;display:block;}
+.grid line{stroke:#1a1a1a;stroke-width:1px;}
+.grid path{stroke-width:0;}
+.axis text{fill:#555;font-size:10px;}
+.axis path,.axis line{stroke:#333;}
+.line-ch1{fill:none;stroke:#0ff;stroke-width:2px;filter:drop-shadow(0 0 4px #0ff);}
+.line-ch2{fill:none;stroke:#f0f;stroke-width:2px;stroke-dasharray:4 4;filter:drop-shadow(0 0 4px #f0f);}
+</style>
+</head>
+<body>
+<div class="top-bar">
+<div class="sys-title>CWRU BEARING FAULT MONITOR｜工业轴承预测监测终端</div>
+<div class="status-indicator">
+<span id="model-badge">MODEL:[WAIT]</span><span>|</span>
+<span id="status-text" style="color:#f33">OFFLINE</span>
+<div id="led-bulb" class="led"></div>
+</div>
+</div>
+<div class="main-container">
+<div id="chart-container" class="oscilloscope-panel"></div>
+<div class="telemetry-panel">
+<div class="data-block ch1"><div class="data-label">CH1：真实轴承振动</div><div id="val-ch1" class="data-value ch1-text">0.000</div></div>
+<div class="data-block ch2"><div class="data-label">CH2：AI故障预测</div><div id="val-ch2" class="data-value ch2-text">0.000</div></div>
+<div id="alert-block" class="data-block alert"><div class="data-label">实时误差｜超限=故障预警</div><div id="val-error" class="data-value alert-text">0.000</div></div>
+<div class="data-block"><div class="data-label">推理延迟(ms)</div><div id="val-latency" class="data-value" style="font-size:24px;color:#ccc">0.0</div></div>
+<div class="data-block"><div class="data-label">HiddenSize配置</div><div id="val-hs" class="data-value" style="font-size:24px;color:#ccc">--</div></div>
+</div>
+</div>
+<script>
+const MAX_POINTS=150;
+let buf=[];
+const cont=document.getElementById("chart-container");
+const w=cont.clientWidth,h=cont.clientHeight;
+const mar={top:20,right:20,bottom:20,left:40};
+const iw=w-mar.left-mar.right,ih=h-mar.top-mar.bottom;
+const svg=d3.select("#chart-container").append("svg").attr("width",w).attr("height",h);
+const g=svg.append("g").attr("transform",`translate(${mar.left},${mar.top})`);
+const x=d3.scaleLinear().domain([0,MAX_POINTS-1]).range([0,iw]);
+const y=d3.scaleLinear().domain([-2,2]).range([ih,0]);
+g.append("g").attr("class","grid").call(d3.axisLeft(y).ticks(10).tickSize(-iw).tickFormat(""));
+g.append("g").attr("class","grid").attr("transform",`translate(0,${ih})`).call(d3.axisBottom(x).ticks(20).tickSize(-ih).tickFormat(""));
+g.append("g").attr("axis").call(d3.axisLeft(y).ticks(5));
+const l1=d3.line().x((d,i)=>x(i)).y(d=>y(d.ch1_actual));
+const l2=d3.line().x((d,i)=>x(i)).y(d=>y(d.ch2_predict));
+const p1=g.append("path").attr("class","line-ch1");
+const p2=g.append("path").attr("class","line-ch2");
+
+let d1=document.getElementById("val-ch1"),d2=document.getElementById("val-ch2"),de=document.getElementById("val-error");
+let dl=document.getElementById("val-latency"),dm=document.getElementById("model-badge"),ds=document.getElementById("status-text");
+let led=document.getElementById("led-bulb"),alertDom=document.getElementById("alert-block"),dhs=document.getElementById("val-hs");
+
+function connect(){
+    let ws=new WebSocket("ws://127.0.0.1:8765");
+    ws.onopen=()=>{ds.textContent="LINK ACTIVE";ds.style.color="#0f0";led.classList.add("online");}
+    ws.onmessage=e=>{
+        let d=JSON.parse(e.data);
+        dm.textContent=`MODEL:${d.model_type}`;
+        dhs.textContent=d.hidden;
+        d1.textContent=d.ch1_actual.toFixed(3);
+        d2.textContent=d.ch2_predict.toFixed(3);
+        de.textContent=d.error_abs.toFixed(3);
+        dl.textContent=d.latency_ms+" ms";
+        if(d.error_abs>0.3) alertDom.classList.add("warn");
+        else alertDom.classList.remove("warn");
+        buf.push(d);
+        if(buf.length>MAX_POINTS) buf.shift();
+        p1.datum(buf).attr("d",l1);
+        p2.datum(buf).attr("d",l2);
+    }
+    ws.onclose=()=>{ds.textContent="OFFLINE";ds.style.color="#f33";led.classList.remove("online");setTimeout(connect,3000)}
+}
+connect();
+</script>
+</body>
+</html>
